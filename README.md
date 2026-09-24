@@ -561,5 +561,6 @@ Built with:
 
 ---
 
-**Status**: ✅ MVP complete | 15/15 tests passing | Ready for early adopters
-**Last updated**: September 24, 2026
+**Status**: ✅ MVP complete | 15/15 tests passing | Ready for early adopters  
+**Maintained by**: [Amriteshkumar Yadav](https://github.com/Amrit-04)
+
