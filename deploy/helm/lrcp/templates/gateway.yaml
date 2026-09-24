@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-gateway
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  selector: { matchLabels: { app: {{ .Release.Name }}-gateway } }
+  template:
+    metadata: { labels: { app: {{ .Release.Name }}-gateway } }
+    spec:
+      containers:
+        - name: gateway
+          image: {{ .Values.gateway.image | quote }}
+          args: ["--address", "0.0.0.0", "--port", "4318", "--max-body-bytes", {{ .Values.gateway.maxBodyBytes | quote }}, "--wal-dir", "/data/wal"]
+          ports: [{ name: otlp-http, containerPort: 4318 }]
+          volumeMounts: [{ name: data, mountPath: /data }]
+          readinessProbe: { httpGet: { path: /healthz, port: otlp-http } }
+          livenessProbe: { httpGet: { path: /healthz, port: otlp-http } }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: "1", memory: 512Mi }
+      volumes: [{ name: data, persistentVolumeClaim: { claimName: {{ .Release.Name }}-data } }]
+---
+apiVersion: v1
+kind: Service
+metadata: { name: {{ .Release.Name }}-gateway }
+spec:
+  selector: { app: {{ .Release.Name }}-gateway }
+  ports: [{ name: otlp-http, port: 4318, targetPort: otlp-http }]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: { name: {{ .Release.Name }}-data }
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: { requests: { storage: {{ .Values.storage.size }} } }

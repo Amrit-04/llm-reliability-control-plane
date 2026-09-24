@@ -1,0 +1,10 @@
+{
+  "name": "llm-reliability-control-plane",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "boost-beast",
+    "boost-system",
+    "gtest",
+    "protobuf"
+  ]
+}

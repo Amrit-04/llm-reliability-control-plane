@@ -1,0 +1,42 @@
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: cpp/gateway/Dockerfile
+    ports: ["4318:4318"]
+    volumes: ["lrcp-data:/data"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:4318/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+  backend:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    ports: ["8000:8000"]
+    volumes: ["lrcp-data:/data"]
+    environment:
+      LRCP_DATA_DIR: /data
+      LRCP_WAL_DIR: /data/wal
+      LRCP_PARQUET_DIR: /data/parquet
+      LRCP_SQLITE_PATH: /data/control.db
+    depends_on:
+      gateway:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  frontend:
+    build:
+      context: ../..
+      dockerfile: frontend/Dockerfile
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports: ["3000:3000"]
+    depends_on: [backend]
+volumes:
+  lrcp-data:

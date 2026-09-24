@@ -1,0 +1,10 @@
+gateway:
+  image: lrcp-gateway:dev
+  replicas: 1
+  maxBodyBytes: 4194304
+backend:
+  image: lrcp-backend:dev
+frontend:
+  image: lrcp-frontend:dev
+storage:
+  size: 5Gi

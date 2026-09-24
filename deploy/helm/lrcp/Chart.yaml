@@ -1,0 +1,6 @@
+apiVersion: v2
+name: lrcp
+description: Experimental deployment of the LLM Reliability Control Plane local MVP
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

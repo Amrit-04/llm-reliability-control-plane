@@ -1,0 +1,77 @@
+# Build outputs
+build/
+*.exe
+*.pdb
+*.ilk
+*.obj
+*.lib
+*.dll
+*.dylib
+*.so
+*.a
+*.out
+cmake_install.cmake
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+
+# CMake generated files
+Testing/
+CTestTestfile.cmake
+*.cmake.in
+
+# Package managers
+.cache/
+.venv/
+vcpkg_installed/
+node_modules/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+*.egg
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Runtime data
+data/
+*.wal
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+
+# Frontend build outputs
+frontend/.next/
+frontend/node_modules/
+frontend/out/
+frontend/.turbo/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+*.cover
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
