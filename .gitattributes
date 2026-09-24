@@ -1,0 +1,11 @@
+# .gitattributes
+# Adjust GitHub Linguist language statistics
+
+# Exclude examples and tests from repo language stats so the core C++ systems footprint is highlighted
+examples/** linguist-documentation
+backend/tests/** linguist-documentation
+
+# Ensure consistent line endings
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
