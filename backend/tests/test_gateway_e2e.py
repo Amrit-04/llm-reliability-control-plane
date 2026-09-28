@@ -57,13 +57,25 @@ def test_gateway_wal_materializes_into_query_api(tmp_path: Path, gateway_binary:
     try:
         assert process.stdout is not None
         line = ""
+        output_lines: list[str] = []
         deadline = time.time() + 5
         while time.time() < deadline:
-            line = process.stdout.readline()
-            if line.startswith("listening on"):
-                break
+            current_line = process.stdout.readline()
+            if current_line:
+                output_lines.append(current_line)
+                if current_line.startswith("listening on"):
+                    line = current_line
+                    break
+            elif process.poll() is not None:
+                remaining = process.stdout.read()
+                if remaining:
+                    output_lines.append(remaining)
+                output = "".join(output_lines)
+                pytest.fail(f"gateway process exited prematurely with code {process.returncode}: {output!r}")
+            time.sleep(0.05)
         else:
-            pytest.fail(f"gateway did not announce a listen address: {line!r}")
+            output = "".join(output_lines)
+            pytest.fail(f"gateway did not announce a listen address (timed out): {output!r}")
         # Extract address:port from "listening on 127.0.0.1:XXXXX" or "listening on 127.0.0.1:XXXXX with ..."
         addr_part = line.split("listening on")[1].strip().split()[0]
         port = int(addr_part.rsplit(":", 1)[1])
