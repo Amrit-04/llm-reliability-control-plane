@@ -30,7 +30,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: gateway-binary
-          path: ../build
+          path: build
       - name: Make gateway executable
         run: chmod +x ../build/lrcp-gateway
       - run: pip install ".[dev]"
