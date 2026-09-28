@@ -130,6 +130,26 @@ class HttpServer::SharedState : public std::enable_shared_from_this<SharedState>
         ++state_->rejected_requests_;
         return write(error_response(request_, http::status::not_found, "only POST /v1/traces is supported\n"));
       }
+
+      if (!state_->config_.auth_token.empty()) {
+        const auto auth_header = request_[http::field::authorization];
+        const auto api_key_header = request_["X-API-Key"];
+        bool authenticated = false;
+        if (!auth_header.empty()) {
+          const auto expected_bearer = "Bearer " + state_->config_.auth_token;
+          if (auth_header == expected_bearer || auth_header == state_->config_.auth_token) {
+            authenticated = true;
+          }
+        }
+        if (!api_key_header.empty() && api_key_header == state_->config_.auth_token) {
+          authenticated = true;
+        }
+        if (!authenticated) {
+          ++state_->rejected_requests_;
+          return write(error_response(request_, http::status::unauthorized, "unauthorized: invalid ingestion token\n"));
+        }
+      }
+
       if (!is_protobuf_content_type(request_[http::field::content_type])) {
         ++state_->rejected_requests_;
         return write(error_response(request_, http::status::unsupported_media_type,

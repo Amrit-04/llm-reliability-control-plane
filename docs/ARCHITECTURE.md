@@ -1,6 +1,6 @@
 # Architecture Deep Dive: LLM Reliability Control Plane
 
-**Last updated:** 2026-09-24
+**Last updated:** 2026-09-28
 
 This document explains every layer of the system — what each component does,
 how to read the code, and how the pieces connect end-to-end.
@@ -14,11 +14,11 @@ how to read the code, and how the pieces connect end-to-end.
 3. [C++ Telemetry Gateway](#3-c-telemetry-gateway)
 4. [Write-Ahead Log (WAL)](#4-write-ahead-log-wal)
 5. [Python Backend (FastAPI)](#5-python-backend-fastapi)
-6. [Materializer — WAL to Parquet](#6-materializer--wal-to-parquet)
+6. [Materializer — Streaming WAL to Parquet](#6-materializer--streaming-wal-to-parquet)
 7. [Query Layer — DuckDB over Parquet](#7-query-layer--duckdb-over-parquet)
-8. [SQLite Control Store](#8-sqlite-control-store)
-9. [Next.js Trace Explorer](#9-nextjs-trace-explorer)
-10. [Deployment](#10-deployment)
+8. [SQLite Control Store & Manifest](#8-sqlite-control-store--manifest)
+9. [Next.js Trace Explorer & Waterfall](#9-nextjs-trace-explorer--waterfall)
+10. [Deployment & Security](#10-deployment--security)
 11. [Testing Strategy](#11-testing-strategy)
 12. [Configuration Reference](#12-configuration-reference)
 13. [Key Design Decisions](#13-key-design-decisions)
@@ -28,7 +28,7 @@ how to read the code, and how the pieces connect end-to-end.
 
 ## 1. System Overview
 
-The LLM Reliability Control Plane (LRCP) is a **local-first observability
+The LLM Reliability Control Plane (LRCP) is a **hardened, local-first observability
 platform** designed for developers building LLM applications, RAG pipelines,
 and AI agents. It collects, stores, and queries OpenTelemetry traces without
 any cloud dependency.
@@ -37,10 +37,16 @@ any cloud dependency.
 
 - **Local-first**: runs on an ordinary developer machine. No cloud account,
   no external database, no internet required after the initial build.
-- **Durable before acknowledgement**: the gateway confirms an OTLP request
-  only after the data is CRC-checked and fsynced to the WAL.
+- **Strict Durability**: the gateway confirms an OTLP request only after
+  the data is CRC-checked and fsynced to the WAL.
+- **Crash-Safe Two-Phase Commit**: Parquet files are written to `.tmp` files,
+  renamed atomically, and indexed in SQLite. Orphaned uncommitted files are
+  automatically detected and purged on recovery.
+- **Single-Writer Lock & Thread Isolation**: In-memory mutex serialization
+  and non-blocking background workers ensure high concurrency without race conditions
+  or event-loop starvation.
 - **Composable storage tiers**: WAL → Parquet → DuckDB today,
-  with a clear path to NATS → ClickHouse for production scale.
+  with a clean path to distributed storage for production scale.
 - **No magic**: every component is explicit. No ORM, no framework auto-wiring,
   no hidden caches. You can reason about the data path by reading the code.
 

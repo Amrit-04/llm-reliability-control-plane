@@ -230,4 +230,87 @@ TEST_F(GatewayTest, RotatesWalWhenMaxFileBytesExceeded) {
   EXPECT_EQ(checksum2, ieee_crc32(payload2));
 }
 
+TEST_F(GatewayTest, RejectsUnauthorizedRequestWhenTokenConfigured) {
+  if (server_) server_->stop();
+  io_context_.stop();
+  if (worker_.joinable()) worker_.join();
+
+  server_.reset();
+  io_context_.restart();
+
+  lrcp::gateway::ServerConfig config{"127.0.0.1", 0, 256, wal_directory_};
+  config.auth_token = "secret-token-123";
+  server_ = std::make_unique<lrcp::gateway::HttpServer>(io_context_, config);
+  server_->start();
+  worker_ = std::thread([this] { io_context_.run(); });
+
+  opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest export_request;
+  export_request.add_resource_spans()->add_scope_spans()->add_spans();
+  std::string payload;
+  ASSERT_TRUE(export_request.SerializeToString(&payload));
+
+  // Request without auth header should be rejected with 401
+  http::request<http::string_body> unauth_msg{http::verb::post, "/v1/traces", 11};
+  unauth_msg.set(http::field::content_type, "application/x-protobuf");
+  unauth_msg.body() = payload;
+  unauth_msg.prepare_payload();
+  EXPECT_EQ(request(unauth_msg).result(), http::status::unauthorized);
+
+  // Request with invalid Bearer token should be rejected with 401
+  http::request<http::string_body> invalid_msg{http::verb::post, "/v1/traces", 11};
+  invalid_msg.set(http::field::content_type, "application/x-protobuf");
+  invalid_msg.set(http::field::authorization, "Bearer wrong-token");
+  invalid_msg.body() = payload;
+  invalid_msg.prepare_payload();
+  EXPECT_EQ(request(invalid_msg).result(), http::status::unauthorized);
+
+  // Request with valid Bearer token should succeed
+  http::request<http::string_body> valid_bearer_msg{http::verb::post, "/v1/traces", 11};
+  valid_bearer_msg.set(http::field::content_type, "application/x-protobuf");
+  valid_bearer_msg.set(http::field::authorization, "Bearer secret-token-123");
+  valid_bearer_msg.body() = payload;
+  valid_bearer_msg.prepare_payload();
+  EXPECT_EQ(request(valid_bearer_msg).result(), http::status::ok);
+
+  // Request with valid X-API-Key header should succeed
+  http::request<http::string_body> valid_api_key_msg{http::verb::post, "/v1/traces", 11};
+  valid_api_key_msg.set(http::field::content_type, "application/x-protobuf");
+  valid_api_key_msg.set("X-API-Key", "secret-token-123");
+  valid_api_key_msg.body() = payload;
+  valid_api_key_msg.prepare_payload();
+  EXPECT_EQ(request(valid_api_key_msg).result(), http::status::ok);
+}
+
+TEST_F(GatewayTest, HandlesConcurrentRequestsSafely) {
+  opentelemetry::proto::collector::trace::v1::ExportTraceServiceRequest export_request;
+  auto* span = export_request.add_resource_spans()->add_scope_spans()->add_spans();
+  span->set_name("concurrent-span");
+  std::string payload;
+  ASSERT_TRUE(export_request.SerializeToString(&payload));
+
+  constexpr int kNumRequests = 20;
+  std::vector<std::thread> clients;
+  std::atomic<int> success_count{0};
+
+  for (int i = 0; i < kNumRequests; ++i) {
+    clients.emplace_back([this, &payload, &success_count] {
+      http::request<http::string_body> msg{http::verb::post, "/v1/traces", 11};
+      msg.set(http::field::content_type, "application/x-protobuf");
+      msg.body() = payload;
+      msg.prepare_payload();
+      auto resp = request(msg);
+      if (resp.result() == http::status::ok) {
+        ++success_count;
+      }
+    });
+  }
+
+  for (auto& client : clients) {
+    if (client.joinable()) client.join();
+  }
+
+  EXPECT_EQ(success_count.load(), kNumRequests);
+  EXPECT_EQ(server_->stats().accepted_requests, kNumRequests);
+}
+
 }  // namespace

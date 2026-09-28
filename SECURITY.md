@@ -1,11 +1,29 @@
-# Security policy
+# Security Policy
 
-## Current scope
+## Current Scope & Capabilities
 
-M1 treats OTLP requests as untrusted input. It applies an HTTP body limit and protobuf parsing, but it does not yet authenticate clients, isolate tenants, encrypt transport, persist telemetry, or perform PII redaction.
+The LLM Reliability Control Plane implements strict defensive security and validation controls:
 
-Do not expose the M1 gateway directly to an untrusted network. Put it behind authenticated TLS infrastructure during development if remote clients are necessary.
+1. **Ingestion Authentication**:
+   - The C++ telemetry gateway supports `--auth-token <TOKEN>` to require `Authorization: Bearer <TOKEN>` or `X-API-Key: <TOKEN>` on all incoming OTLP export requests.
+   - The FastAPI backend supports API key authentication via `LRCP_API_KEY` and `LRCP_REQUIRE_AUTH=true`.
 
-## Reporting a vulnerability
+2. **Defensive Input Validation & Hardening**:
+   - HTTP body size limits (`--max-body-bytes`, default 4 MiB) enforced at Beast parser level before memory allocation.
+   - Protobuf parsing validation rejecting malformed or truncated payloads.
+   - IEEE CRC-32 checksum framing on every WAL record to detect disk corruption or tampering.
+   - Maximum WAL record size enforcement (`LRCP_MAX_WAL_RECORD_BYTES`) preventing memory exhaustion attacks.
+   - DuckDB `TRY_CAST` defensive SQL queries preventing crashes on malformed GenAI attribute injection.
 
-Until a project security contact is configured, do not disclose sensitive findings in a public issue. Contact the repository maintainer privately and include reproduction steps, affected revision, and potential impact.
+3. **Multi-Tenant / Project Isolation**:
+   - Project registry in SQLite with unique API keys and project-scoped trace query filters (`?project_id=<id>`).
+
+4. **Transport & Network Hardening**:
+   - The gateway and backend are designed for local-first execution. When exposing across networks or in production clusters, place them behind TLS-terminating reverse proxies (e.g. Envoy, Nginx, or Cloudflare).
+
+## Reporting a Vulnerability
+
+If you discover a security issue or vulnerability in LRCP:
+1. Do not disclose the vulnerability in a public GitHub issue.
+2. Contact the maintainer privately via security report.
+3. Provide full reproduction steps, affected commit hash, and assessment of impact.

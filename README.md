@@ -162,34 +162,30 @@ Services:
 
 | Feature | Status | Details |
 |---------|--------|---------|
-| **OTLP/HTTP Gateway** | ✅ Working | Binary protobuf, CRC-32 WAL |
-| **Durable WAL** | ✅ Working | Fsync before ACK, size-based rotation |
-| **Parquet Materialization** | ✅ Working | Zstd compression, idempotent |
-| **DuckDB Queries** | ✅ Working | Sub-100ms p99 latency |
-| **REST API** | ✅ Working | Traces, spans, analytics |
-| **Trace Explorer UI** | ✅ Working | Dark theme, responsive |
-| **Auto-Materialization** | ✅ Working | Configurable interval |
-| **Live LLM Integration** | ✅ Working | LM Studio, OpenTelemetry |
-| **GenAI Analytics** | ✅ Working | Per-model tokens, latency |
-| **Docker Compose** | ✅ Working | 3-service stack |
-| **Helm Chart** | ⚠️ Partial | Gateway only (experimental) |
+| **OTLP/HTTP Gateway** | ✅ Working | Multi-threaded C++ gateway, binary protobuf, IEEE CRC-32 WAL |
+| **Durable WAL** | ✅ Working | Strict durability (fsync before 200 OK ACK), size-based rotation |
+| **Parquet Materialization** | ✅ Working | Zstd compression, idempotent, streaming bounded batches |
+| **Crash Recovery** | ✅ Working | Multi-phase atomic commit, orphaned file quarantine |
+| **Concurrency & Locks** | ✅ Working | Non-blocking thread pooling, inter-process async safe |
+| **DuckDB Queries** | ✅ Working | Sub-100ms p99 latency, zero-copy vectorized execution |
+| **REST API** | ✅ Working | Multi-tenant project keys, traces, spans, analytics |
+| **Trace Explorer UI** | ✅ Working | Highly interactive span waterfall and hierarchical tree viewer |
+| **Auto-Materialization** | ✅ Working | Background worker off-event-loop execution |
+| **GenAI Analytics** | ✅ Working | Deep token parsing, nested OTLP attribute indexing |
+| **Authentication** | ✅ Working | `--auth-token` ingestion validation, Python backend auth headers |
+| **Data Lifecycle** | ✅ Working | SQLite manifest indexing, safe Parquet / WAL compaction |
+| **Docker Compose** | ✅ Working | Hardened 3-service stack with non-root security contexts |
 
 ### 🚧 In Progress
 
-- Bounded queue (remove mutex bottleneck)
-- WAL compaction
-- Retention policies
-- Authentication (API keys)
+- Trace hierarchy sampling
+- Retention and TTL garbage collection
 
 ### 📋 Planned
 
-- Trace waterfall visualization
-- Token cost tracking
-- Error aggregation dashboard
-- NATS JetStream integration
-- ClickHouse for production scale
-- Multi-tenancy
-- PII redaction
+- Live NATS JetStream integration
+- Complete ClickHouse cluster persistence for vast multi-node scale
+- PII redaction pipeline
 
 ---
 
@@ -350,7 +346,7 @@ No formal benchmark suite yet. Measurements taken during development testing on:
 ctest --test-dir build --output-on-failure -C Debug
 ```
 
-**Results**: 7/7 tests passing (100%)
+**Results**: 9/9 tests passing (100%)
 
 Tests cover:
 - CRC-32 cross-language compatibility
@@ -360,6 +356,7 @@ Tests cover:
 - Malformed input rejection
 - Oversize payload handling
 - WAL rotation
+- Authentication token validation and rejection
 
 ### Python Backend (pytest)
 
@@ -368,17 +365,21 @@ cd backend
 uv run pytest -v
 ```
 
-**Results**: 8/8 tests passing (100%)
+**Results**: 29/29 tests passing (100%)
 
 Tests cover:
-- Health endpoint
-- CRC-32 compatibility
-- Project creation with duplicate rejection
-- Idempotent materialization
-- Checksum mismatch handling
-- Query pipeline end-to-end
-- Analytics endpoints
-- Background auto-materialization
+- Health and status endpoints
+- CRC-32 compatibility with C++ gateway
+- Materializer single-runner concurrency locking
+- Crash recovery & atomic file renaming
+- Defensive WAL corruption quarantine & error recording
+- Bounded-memory streaming batching & schema enforcement
+- Safe Parquet compaction & WAL file lifecycle management
+- Query semantics (wall-clock duration vs aggregate duration, safe DuckDB casting)
+- Trace & model analytics endpoints
+- Authentication and project security isolation
+- Multi-worker background auto-materialization
+- Gateway end-to-end integration
 
 ### Frontend
 
@@ -387,7 +388,7 @@ cd frontend
 npm run build
 ```
 
-**Result**: ✅ TypeScript strict mode, successful build
+**Result**: ✅ TypeScript strict mode, successful build with interactive Waterfall & Tree Explorer
 
 ---
 
@@ -523,23 +524,23 @@ See [`SECURITY.md`](SECURITY.md) for security policy and vulnerability reporting
 
 ## Roadmap
 
-### Near-Term (2-4 weeks)
-- [ ] Bounded queue for higher throughput
-- [ ] API key authentication
-- [ ] WAL compaction
-- [ ] Retention policies
+### Completed Hardening Milestones
+- [x] Multi-threaded C++ gateway with Boost.Asio I/O context pool
+- [x] API key and ingestion token authentication
+- [x] Single-writer materialization mutex and async non-blocking execution
+- [x] Crash-safe 2-phase Parquet commit and orphan reconciliation
+- [x] Defensive WAL parsing, CRC-32 validation, and quarantine lifecycle
+- [x] Bounded streaming batching with canonical PyArrow schema
+- [x] Safe Parquet compaction and WAL lifecycle management
+- [x] Disambiguated trace wall-clock duration & safe DuckDB token casting
+- [x] Interactive Trace Explorer with hierarchical span tree and waterfall timeline
+- [x] Full Helm deployment manifests (gateway, backend, frontend) and Docker hardening
 
-### Medium-Term (1-3 months)
-- [ ] Trace waterfall visualization
-- [ ] Token cost tracking
-- [ ] Complete Helm chart
-- [ ] Performance benchmarks
-
-### Long-Term (3-6 months)
-- [ ] NATS JetStream integration
-- [ ] ClickHouse for production scale
-- [ ] Multi-tenancy
-- [ ] PII redaction
+### Near-Term & Production Scale
+- [ ] Trace hierarchy sampling and retention TTL policies
+- [ ] Live NATS JetStream integration
+- [ ] ClickHouse cluster integration for multi-node deployments
+- [ ] Automated PII detection and redaction pipeline
 
 ---
 
@@ -561,6 +562,6 @@ Built with:
 
 ---
 
-**Status**: ✅ MVP complete | 15/15 tests passing | Ready for early adopters  
+**Status**: ✅ Production-Grade Local-First Control Plane | 38/38 tests passing | Ready for early adopters  
 **Maintained by**: [Amriteshkumar Yadav](https://github.com/Amrit-04)
 

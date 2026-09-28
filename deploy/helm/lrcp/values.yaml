@@ -2,9 +2,18 @@ gateway:
   image: lrcp-gateway:dev
   replicas: 1
   maxBodyBytes: 4194304
+
 backend:
   image: lrcp-backend:dev
+
 frontend:
   image: lrcp-frontend:dev
+  serviceType: ClusterIP
+
 storage:
   size: 5Gi
+
+security:
+  requireAuth: "false"
+  # Set this value to enable API key validation on the backend and gateway Auth-Token
+  # apiKey: "your-secure-api-key-here"

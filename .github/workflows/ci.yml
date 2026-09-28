@@ -13,13 +13,26 @@ jobs:
         run: cmake -S . -B build -G Ninja -DLRCP_BUILD_TESTS=ON
       - name: Build and test
         run: cmake --build build && ctest --test-dir build --output-on-failure
+      - name: Upload gateway binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: gateway-binary
+          path: build/lrcp-gateway
   python:
+    needs: cpp
     runs-on: ubuntu-latest
     defaults: { run: { working-directory: backend } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
+      - name: Download gateway binary
+        uses: actions/download-artifact@v4
+        with:
+          name: gateway-binary
+          path: ../build
+      - name: Make gateway executable
+        run: chmod +x ../build/lrcp-gateway
       - run: pip install ".[dev]"
       - run: pytest
   frontend:

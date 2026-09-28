@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: {{ .Release.Name }}-backend
+  template:
+    metadata:
+      labels:
+        app: {{ .Release.Name }}-backend
+    spec:
+      containers:
+        - name: backend
+          image: {{ .Values.backend.image | quote }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: LRCP_DATA_DIR
+              value: "/data"
+            - name: LRCP_WAL_DIR
+              value: "/data/wal"
+            - name: LRCP_PARQUET_DIR
+              value: "/data/parquet"
+            - name: LRCP_SQLITE_PATH
+              value: "/data/control.db"
+            - name: LRCP_REQUIRE_AUTH
+              value: {{ .Values.security.requireAuth | quote }}
+            {{- if .Values.security.apiKey }}
+            - name: LRCP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Release.Name }}-auth
+                  key: apiKey
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-backend
+spec:
+  selector:
+    app: {{ .Release.Name }}-backend
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

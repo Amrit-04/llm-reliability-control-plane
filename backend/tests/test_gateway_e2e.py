@@ -32,7 +32,7 @@ def _gateway_binary() -> Path | None:
 def gateway_binary() -> Path:
     binary = _gateway_binary()
     if binary is None:
-        pytest.skip("C++ gateway binary is not built in this checkout")
+        pytest.fail("C++ gateway binary is strictly required for E2E tests, but was not found.")
     return binary
 
 
@@ -64,7 +64,9 @@ def test_gateway_wal_materializes_into_query_api(tmp_path: Path, gateway_binary:
                 break
         else:
             pytest.fail(f"gateway did not announce a listen address: {line!r}")
-        port = int(line.rsplit(":", 1)[1].strip())
+        # Extract address:port from "listening on 127.0.0.1:XXXXX" or "listening on 127.0.0.1:XXXXX with ..."
+        addr_part = line.split("listening on")[1].strip().split()[0]
+        port = int(addr_part.rsplit(":", 1)[1])
         payload_request = ExportTraceServiceRequest()
         resource_spans = payload_request.resource_spans.add()
         resource_spans.resource.attributes.add(key="service.name").value.string_value = "e2e"

@@ -13,7 +13,7 @@
 namespace {
 
 void usage() {
-  std::cerr << "usage: lrcp-gateway [--address ADDRESS] [--port PORT] [--max-body-bytes BYTES] [--max-wal-file-bytes BYTES] [--wal-dir PATH]\n";
+  std::cerr << "usage: lrcp-gateway [--address ADDRESS] [--port PORT] [--max-body-bytes BYTES] [--max-wal-file-bytes BYTES] [--wal-dir PATH] [--auth-token TOKEN]\n";
 }
 
 }  // namespace
@@ -34,6 +34,7 @@ int main(int argc, char* argv[]) {
       else if (option == "--max-body-bytes") config.max_body_bytes = std::stoull(argv[index + 1]);
       else if (option == "--max-wal-file-bytes") config.max_wal_file_bytes = std::stoull(argv[index + 1]);
       else if (option == "--wal-dir") config.wal_directory = argv[index + 1];
+      else if (option == "--auth-token") config.auth_token = argv[index + 1];
       else { usage(); return EXIT_FAILURE; }
     } catch (const std::exception&) {
       usage(); return EXIT_FAILURE;
@@ -43,19 +44,26 @@ int main(int argc, char* argv[]) {
   if (config.max_wal_file_bytes == 0) { std::cerr << "max-wal-file-bytes must be positive\n"; return EXIT_FAILURE; }
 
   try {
-    boost::asio::io_context io_context{1};
+    const auto hardware_concurrency = std::thread::hardware_concurrency();
+    const auto num_threads = hardware_concurrency > 0 ? hardware_concurrency : 4;
+    boost::asio::io_context io_context{static_cast<int>(num_threads)};
     lrcp::gateway::HttpServer server{io_context, config};
     server.start();
     std::cout << "listening on " << config.address << ':' << server.port() << std::endl;
     boost::asio::signal_set signals{io_context, SIGINT, SIGTERM};
     signals.async_wait([&server, &io_context](const boost::system::error_code&, int) {
-      // Stop accepting first. In-flight WAL appends still complete only if
-      // their handler is already running; outstanding HTTP reads are cancelled
-      // when the io_context stops.
       server.stop();
       io_context.stop();
     });
+
+    std::vector<std::thread> workers;
+    for (unsigned int i = 1; i < num_threads; ++i) {
+      workers.emplace_back([&io_context] { io_context.run(); });
+    }
     io_context.run();
+    for (auto& worker : workers) {
+      if (worker.joinable()) worker.join();
+    }
   } catch (const std::exception& error) {
     std::cerr << "fatal: " << error.what() << '\n';
     return EXIT_FAILURE;

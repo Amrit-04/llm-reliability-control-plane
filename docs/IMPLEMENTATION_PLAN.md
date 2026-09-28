@@ -60,24 +60,23 @@ This document outlines the improvements being made to transform the LLM Reliabil
 ### 3. Missing Features to Implement
 
 #### High Priority
-1. **Bounded queue in gateway**: Replace mutex serialization with lock-free queue
-2. **WAL compaction**: Merge old segments and clean up materialized records
-3. **Retention policies**: Auto-delete old Parquet files
-4. **Authentication**: API keys and JWT support
-5. **Rate limiting**: Per-client throttling
+1. **NATS JetStream Integration**: Distributed queueing for multi-node ingestion
+2. **ClickHouse Analytics Engine**: Scaling past local Parquet files
+3. **Retention policies / GC**: Auto-delete old Parquet files and orphaned manifests
+4. **Rate limiting**: Per-client and per-project throttling
+5. **PII redaction**: Content policies for sensitive data
 
 #### Medium Priority
 6. **Metrics export**: Prometheus endpoint
-7. **Trace waterfall UI**: Visual span timeline
-8. **Error tracking dashboard**: Aggregate failures by service
-9. **Token usage analytics**: Cost tracking by model/provider
-10. **PII redaction**: Content policies for sensitive data
+7. **Error tracking dashboard**: Aggregate failures by service
+8. **Token usage cost analytics**: Cost tracking by model/provider
+9. **OTLP gRPC support**: Alternative to HTTP
+10. **OTLP JSON support**: Alternative to protobuf
 
 #### Low Priority
-11. **OTLP gRPC support**: Alternative to HTTP
-12. **OTLP JSON support**: Alternative to protobuf
-13. **Multi-tenancy**: Project-level isolation
-14. **Evaluation framework**: LLM response quality metrics
+11. **Evaluation framework**: LLM response quality metrics
+12. **Prompt registry**: Versioning and management
+13. **RAG retrieval visibility**: Vector search span semantic conventions
 
 ---
 

@@ -17,6 +17,7 @@ struct ServerConfig {
   std::size_t max_body_bytes{4U * 1024U * 1024U};
   std::filesystem::path wal_directory{"data/wal"};
   std::size_t max_wal_file_bytes{64U * 1024U * 1024U};
+  std::string auth_token{""};
 };
 
 struct GatewayStats {
