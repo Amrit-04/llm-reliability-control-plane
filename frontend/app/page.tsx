@@ -23,8 +23,14 @@ type HealthStatus = {
 
 async function getTraces(): Promise<{ items: Trace[]; error: string | null }> {
   const endpoint = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  const apiKey = process.env.BACKEND_API_KEY ?? process.env.LRCP_API_KEY;
+  const init: RequestInit = {
+    cache: "no-store",
+    ...(apiKey ? { headers: { "X-API-Key": apiKey } } : {}),
+  };
+
   try {
-    const response = await fetch(`${endpoint}/api/v1/traces`, { cache: "no-store" });
+    const response = await fetch(`${endpoint}/api/v1/traces`, init);
     if (!response.ok) {
       return { items: [], error: `Backend returned HTTP ${response.status}` };
     }
@@ -37,10 +43,30 @@ async function getTraces(): Promise<{ items: Trace[]; error: string | null }> {
 
 async function getHealth(): Promise<HealthStatus | null> {
   const endpoint = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  const apiKey = process.env.BACKEND_API_KEY ?? process.env.LRCP_API_KEY;
+  const init: RequestInit = {
+    cache: "no-store",
+    ...(apiKey ? { headers: { "X-API-Key": apiKey } } : {}),
+  };
+
   try {
-    const response = await fetch(`${endpoint}/healthz`, { cache: "no-store" });
-    if (response.ok) return await response.json();
-    return null;
+    const response = await fetch(`${endpoint}/api/v1/system/status`, init);
+    if (!response.ok) {
+      // Fallback to healthz if system/status fails (e.g. auth required but no key configured yet)
+      const fallback = await fetch(`${endpoint}/healthz`, { cache: "no-store" });
+      if (fallback.ok) return { status: "ok" } as HealthStatus;
+      return null;
+    }
+    const data = await response.json();
+    return {
+      status: data.status,
+      wal_directory: "",
+      parquet_directory: "",
+      sqlite_database: "",
+      wal_files_count: data.wal?.segment_count ?? 0,
+      parquet_files_count: data.parquet?.file_count ?? 0,
+      committed_parquet_files_count: data.parquet?.file_count ?? 0,
+    };
   } catch {
     return null;
   }

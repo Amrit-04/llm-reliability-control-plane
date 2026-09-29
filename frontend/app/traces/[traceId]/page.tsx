@@ -2,8 +2,14 @@ import { TraceViewer, Span } from "./TraceViewer";
 
 async function loadTrace(traceId: string): Promise<{ spans: Span[]; error: string | null }> {
   const endpoint = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+  const apiKey = process.env.BACKEND_API_KEY ?? process.env.LRCP_API_KEY;
+  const init: RequestInit = {
+    cache: "no-store",
+    ...(apiKey ? { headers: { "X-API-Key": apiKey } } : {}),
+  };
+
   try {
-    const response = await fetch(`${endpoint}/api/v1/traces/${traceId}`, { cache: "no-store" });
+    const response = await fetch(`${endpoint}/api/v1/traces/${traceId}`, init);
     if (response.status === 404) {
       return { spans: [], error: "Trace not found. Materialize WAL records first." };
     }

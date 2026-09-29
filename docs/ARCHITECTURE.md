@@ -328,23 +328,39 @@ All configuration comes from environment variables with sensible defaults:
 
 ---
 
-## 6. Materializer — WAL to Parquet
+## 6. Materializer — WAL to Parquet & Storage Lifecycle
 
 The materializer is the bridge between the raw WAL (binary protobuf) and
-the queryable Parquet files.
+the queryable Parquet files. It enforces crash safety, concurrency coordination,
+and bounded memory execution.
 
 ### How it works
 
-1. **Read the manifest**: query SQLite for all previously materialized
-   `(source_file, source_offset)` pairs.
-2. **Scan WAL files**: iterate every `*.wal` in the WAL directory (sorted).
-3. **For each record**: verify the CRC-32, decode the protobuf, extract
-   normalized span fields.
-4. **Skip known records**: if `(filename, offset)` is in the manifest, skip.
-5. **Write Parquet**: create one immutable Parquet file per materialization
-   run: `spans-YYYYMMDDTHHMMSS.parquet` with Zstd compression.
-6. **Update manifest**: insert all new `(file, offset, parquet_file)` rows
-   into SQLite.
+1. **Acquire Storage Lifecycle Lock**: Coordinates materialization, compaction,
+   and WAL cleanup across threads and processes via SQLite `BEGIN EXCLUSIVE` on a
+   dedicated lock database (`$DATA_DIR/storage_lifecycle.lock.db`) and an in-process threading lock.
+2. **Reconcile Manifest & Scan WAL**: Queries SQLite for all previously materialized
+   `(source_file, source_offset)` pairs and iterates every `*.wal` file in sorted order.
+3. **Parse Records Defensively**: For each record, unpacks length and CRC-32 header.
+   If corrupt, logs exact byte offset and reason to `wal_corruption_events` table and stops
+   at the corruption boundary without discarding valid preceding data.
+4. **Stream into Bounded Parquet Batches**: Collects spans up to `materialize_batch_size` (default 5,000)
+   with canonical PyArrow typing (`SPAN_ARROW_SCHEMA`).
+5. **Atomic Two-Phase Write**:
+   - Writes batch to a temporary file: `tmp-spans-<timestamp>-<uuid>.parquet.tmp`.
+   - Renames `.tmp` file atomically to `spans-<timestamp>-<uuid>.parquet`.
+   - Inserts record into `parquet_files` table with `status = 'COMMITTED'` and updates `materialized_wal_records`.
+6. **Orphan Reconciliation**:
+   On startup or recovery, `cleanup_orphaned_parquet_files()` identifies and unlinks
+   any leftover `.tmp` files or uncommitted `.parquet` files not marked `COMMITTED` in the manifest.
+
+### Memory-Safe Streaming Compaction
+
+To prevent small-file sprawl without consuming unbounded memory:
+- `compact_parquet_files(settings)` merges small committed Parquet files into consolidated segments.
+- Uses `pq.ParquetWriter` and streams row groups batch-by-batch without loading full datasets into RAM.
+- Employs atomic manifest transition: new file is marked `COMMITTED`, merged files marked `COMPACTED`,
+  and old physical files are safely unlinked.
 
 ### Normalized span schema
 
@@ -357,78 +373,64 @@ Each span row contains:
 | `parent_span_id` | string | Hex-encoded parent span ID |
 | `name` | string | Span operation name |
 | `service_name` | string | From `service.name` resource attribute |
+| `project_id` | string | From `project.id` resource attribute (multi-tenancy) |
 | `start_time_unix_nano` | int64 | Span start time |
 | `end_time_unix_nano` | int64 | Span end time |
 | `duration_ns` | int64 | `end - start`, clamped to ≥ 0 |
-| `status_code` | int32 | OpenTelemetry status code |
+| `status_code` | int32 | OpenTelemetry status code (0=UNSET, 1=OK, 2=ERROR) |
 | `status_message` | string | Status description |
 | `resource_attributes_json` | string | JSON-encoded resource attributes |
 | `attributes_json` | string | JSON-encoded span attributes |
+| `events_json` | string | JSON-encoded span events |
+| `links_json` | string | JSON-encoded span links |
 | `source_file` | string | WAL filename for provenance |
 | `source_offset` | int64 | Byte offset in WAL file |
-
-### Known limitation: orphan Parquet files
-
-If the process crashes after writing a Parquet file but before committing
-the manifest rows to SQLite, the Parquet file will exist without manifest
-coverage. The next materialization run won't re-process those records
-(they're in the Parquet but not in SQLite), but duplicate data could appear
-if the WAL is replayed. This is a known MVP limitation.
 
 ---
 
 ## 7. Query Layer — DuckDB over Parquet
 
-DuckDB acts as an ephemeral analytical engine. Each query opens a fresh
-connection (`duckdb.connect()`), uses `read_parquet(?)` with a list of all
-Parquet files, and returns results as Python dicts.
+DuckDB acts as an ephemeral analytical engine. Each query checks the SQLite manifest
+via `get_committed_parquet_files(settings)` to exclusively query valid, physically present
+Parquet files marked `COMMITTED` (excluding temporary or compacted files).
 
-### Trace list query
+### Safe Query Isolation & Parameter Binding
+All queries are parameterized with `?` placeholders (eliminating SQL injection risks):
+- `list_traces`: Groups spans by `trace_id`, calculates aggregate span durations, wall-clock start/end timestamps, and computes error counts (`status_code = 2`).
+- `get_trace`: Fetches all spans for a given `trace_id`.
+- `analytics_overview`: Aggregates total traces, total spans, token totals, unique services, and error rate.
+- `analytics_models`: Extracts `gen_ai.*` attributes via DuckDB JSON pushdown, computing p95 latency and token consumption per model.
 
-```sql
-SELECT
-  trace_id,
-  min(start_time_unix_nano) AS start_time_unix_nano,
-  sum(duration_ns) AS aggregate_span_duration_ns,
-  count(*) AS span_count,
-  max(service_name) AS service_name
-FROM read_parquet(?)
-GROUP BY trace_id
-ORDER BY start_time_unix_nano DESC
-LIMIT ?
-```
-
-### Trace detail query
-
-```sql
-SELECT *
-FROM read_parquet(?)
-WHERE trace_id = ?
-ORDER BY start_time_unix_nano
-```
+### OpenTelemetry Status Code Semantics
+Error counts across all analytics queries strictly adhere to OpenTelemetry semantics:
+- `STATUS_CODE_UNSET = 0` (Neutral / Not an error)
+- `STATUS_CODE_OK = 1` (Explicitly successful / Not an error)
+- `STATUS_CODE_ERROR = 2` (Error condition)
+Only spans with `status_code = 2` contribute to `error_count` and `error_rate`.
 
 ### Why DuckDB?
 
-- Zero configuration — no server process, no setup.
-- Reads Parquet directly — no ETL step.
-- Columnar analytics — efficient aggregation over wide schemas.
-- Embeddable — just a Python import.
+- Zero configuration — embedded, vectorized query engine.
+- Reads Parquet directly without an ETL step.
+- Vectorized columnar execution over wide schemas.
+- Safe type parsing with `TRY_CAST` to handle unexpected attribute formatting.
 
 ---
 
-## 8. SQLite Control Store
+## 8. SQLite Control Store & Manifest
 
-SQLite stores two tables:
+SQLite manages control-plane metadata and storage state:
 
 ### `projects`
 ```sql
 CREATE TABLE projects (
-  id   TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  id           TEXT PRIMARY KEY,
+  name         TEXT NOT NULL,
+  api_key_hash TEXT,
+  created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
-Future: associates traces with projects for multi-tenant isolation.
+Stores registered projects with SHA-256 hashed API keys. Client requests providing project API keys are verified via constant-time `hmac.compare_digest` and restricted to their respective `project_id`.
 
 ### `materialized_wal_records`
 ```sql
@@ -440,31 +442,48 @@ CREATE TABLE materialized_wal_records (
   PRIMARY KEY (source_file, source_offset)
 );
 ```
-Prevents duplicate materialization across runs. Each row maps a WAL record
-to the Parquet file it was written into.
+Tracks materialized byte offsets across WAL segments to guarantee idempotent replay.
+
+### `parquet_files`
+```sql
+CREATE TABLE parquet_files (
+  filename     TEXT PRIMARY KEY,
+  record_count INTEGER NOT NULL,
+  status       TEXT NOT NULL, -- COMMITTED | COMPACTED | ORPHANED
+  created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+Serves as the authoritative manifest for Parquet files. Query endpoints only read files with `status = 'COMMITTED'`.
+
+### `wal_corruption_events`
+```sql
+CREATE TABLE wal_corruption_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_file TEXT NOT NULL,
+  offset      INTEGER NOT NULL,
+  reason      TEXT NOT NULL,
+  recorded_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+Records exact byte offsets and diagnostics whenever malformed or corrupted records are quarantined.
 
 ---
 
-## 9. Next.js Trace Explorer
+## 9. Next.js Trace Explorer & Waterfall
 
-### Architecture choice
+### Architecture Choice
 
-The frontend uses **Next.js 15 with React 19 server components**. Pages
-are server-rendered — no client-side state, no bundled API client. The
-`fetch()` call runs server-side at request time (`cache: "no-store"`).
+The frontend is built with **Next.js 15 and React 19**.
+- Server components (`app/page.tsx`, `app/traces/[traceId]/page.tsx`) securely forward backend API keys (`X-API-Key`) from the server runtime environment to FastAPI without leaking credentials to client bundles.
+- Client components (`TraceViewer.tsx`) provide an interactive trace waterfall timeline, hierarchical span tree viewer, and detail inspector with search and filtering.
+- Visual status indicators strictly reflect OpenTelemetry error semantics (`span.status_code === 2`).
 
 ### Pages
 
 | Route | Component | Purpose |
 |-------|-----------|---------|
-| `/` | `app/page.tsx` | Trace list with service name, span count, aggregate duration |
-| `/traces/[traceId]` | `app/traces/[traceId]/page.tsx` | Span tree for one trace |
-
-### Styling
-
-A single `styles.css` provides a dark theme. The design is grid-based,
-responsive (collapses to 2 columns on mobile), and uses system fonts with
-Inter as primary.
+| `/` | `app/page.tsx` | Trace list with status overview, service name, span count, and duration |
+| `/traces/[traceId]` | `app/traces/[traceId]/page.tsx` | Interactive trace waterfall timeline and span tree inspector |
 
 ### Backend URL
 
@@ -513,7 +532,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs three parallel jobs:
 
 ### C++ tests (GTest)
 
-7 tests in `cpp/gateway/tests/gateway_tests.cpp`:
+9 tests in `cpp/gateway/tests/gateway_tests.cpp`:
 
 | Test | What it verifies |
 |------|-----------------|
@@ -524,33 +543,37 @@ GitHub Actions (`.github/workflows/ci.yml`) runs three parallel jobs:
 | `RejectsMalformedProtobuf` | Bad bytes → 400 |
 | `RejectsOversizePayload` | Body > limit → 413 |
 | `RotatesWalWhenMaxFileBytesExceeded` | Two records exceeding limit → two separate WAL files |
+| `RejectsUnauthorizedRequestWhenTokenConfigured` | Rejects missing/bad auth tokens with 401 Unauthorized |
+| `HandlesConcurrentRequestsSafely` | Verifies multi-connection ingestion without data corruption |
 
 Each test starts a real HTTP server on port 0 (OS-assigned) and makes actual
 TCP connections. This is integration-level testing, not mocking.
 
 ### Python tests (pytest)
 
-8 tests across two files:
+45 tests across 13 dedicated test suites:
 
-**`test_api.py`** — 7 tests using `TestClient` (in-process ASGI):
-- Health check
-- CRC-32 cross-language compatibility
-- Project creation and duplicate rejection
-- Materialization of WAL records (once, no duplicates)
-- Checksum mismatch rejection
-- Full query pipeline (materialize → list → get)
-- Background auto-materialization with polling
-
-**`test_gateway_e2e.py`** — 1 test:
-- Starts the actual C++ binary as a subprocess
-- Sends an OTLP request via `urllib`
-- Materializes the resulting WAL
-- Queries the materialized trace
+- **`test_api.py`**: Health, basic CRUD, end-to-end trace query.
+- **`test_analytics_and_semantics.py`**: Wall-clock vs aggregate duration, safe DuckDB casting.
+- **`test_auth_and_security.py`**: Token validation, project CRUD, header parsing.
+- **`test_batching_and_lifecycle.py`**: Batch limits, Parquet compaction, WAL cleanup.
+- **`test_crash_recovery.py`**: Temporary file cleanup and duplicate suppression on restart.
+- **`test_gateway_e2e.py`**: Cross-process ingestion from C++ gateway to Python query API.
+- **`test_materializer_concurrency.py`**: Single-runner mutual exclusion and concurrency safety.
+- **`test_memory_safe_compaction.py`**: Memory-bounded streaming compaction via PyArrow row groups.
+- **`test_otel_status_semantics.py`**: Strict OpenTelemetry status code semantics (`status_code == 2`).
+- **`test_parquet_compaction_atomicity.py`**: Compaction failure injection and manifest isolation.
+- **`test_project_auth_and_isolation.py`**: SHA-256 token hashing, constant-time verification, multi-tenant isolation.
+- **`test_require_auth_fail_closed.py`**: Fail-closed startup validation when auth is enabled without keys.
+- **`test_shutdown_lifecycle.py`**: Clean background worker cancellation on server shutdown.
+- **`test_sql_injection_regression.py`**: SQL injection payload resistance via parameterized binding.
+- **`test_storage_lifecycle_races.py`**: Concurrent materialization, compaction, and cleanup locking.
+- **`test_wal_corruption_offset.py`**: Exact byte offset reporting for WAL corruption events.
+- **`test_wal_defensive.py`**: Robust handling of zero-length, truncated, and checksum-mismatched WAL records.
 
 ### Frontend
 
-No unit tests. The CI verifies that `npm run build` succeeds (type-checking
-and Next.js compilation).
+Verified via `npm run build` with TypeScript strict mode enabled (`strict: true`).
 
 ---
 
@@ -566,6 +589,8 @@ lrcp-gateway [OPTIONS]
   --max-body-bytes N      Max HTTP body size in bytes (default: 4194304)
   --max-wal-file-bytes N  WAL rotation threshold (default: 67108864)
   --wal-dir PATH          WAL directory path (default: data/wal)
+  --auth-token TOKEN      Required Bearer/X-API-Key token for ingestion
+  --threads N             Number of worker threads (default: 4)
   --help                  Show usage and exit
 ```
 
@@ -578,12 +603,15 @@ lrcp-gateway [OPTIONS]
 | `LRCP_PARQUET_DIR` | `$DATA_DIR/parquet` | Parquet output |
 | `LRCP_SQLITE_PATH` | `$DATA_DIR/control.db` | SQLite path |
 | `LRCP_MATERIALIZE_INTERVAL_SECONDS` | `2.0` | Auto-materialize interval (0=off) |
+| `LRCP_REQUIRE_AUTH` | `false` | Enable API key authentication |
+| `LRCP_API_KEY` | `""` | Master admin API key (required if `LRCP_REQUIRE_AUTH=true`) |
 
 ### Frontend environment
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `BACKEND_URL` | `http://127.0.0.1:8000` | API server URL |
+| `BACKEND_API_KEY` / `LRCP_API_KEY` | `""` | API key forwarded in server-side requests |
 
 ---
 
@@ -601,24 +629,20 @@ The WAL stores the raw OTLP protobuf bytes rather than a normalized format.
 This preserves full fidelity and allows re-materialization with new schemas.
 The materializer handles normalization.
 
-### Immutable Parquet parts
+### Immutable Parquet parts & Manifest Tracking
 
-Each materialization run creates a new Parquet file rather than modifying
-existing ones. This makes retention/deletion simple (just delete old files)
-and avoids concurrent read/write issues.
+Each materialization run writes to a temporary Parquet file and commits atomically
+to the SQLite manifest. Queries only scan committed files, preventing dirty reads.
 
-### No ORM
+### Parameterized SQL & No ORM
 
-The project uses raw SQL (SQLite via `sqlite3`, DuckDB via `duckdb`). This
-keeps the data path transparent and avoids ORM overhead and abstraction
-leaks. The schemas are simple enough that an ORM adds no value.
+The project uses raw SQL with parameterized queries (`?` placeholders) for SQLite and DuckDB.
+This prevents SQL injection, avoids ORM overhead, and ensures complete control over query plans.
 
-### Server components only
+### Server components only for Secrets
 
-The Next.js frontend renders entirely on the server. There is no client-side
-JavaScript for data fetching, no state management library, no loading
-spinners. Each page load yields a complete HTML document. This is simpler
-and faster for a developer tool.
+The Next.js frontend fetches data using React Server Components, keeping API keys
+strictly in the server environment without exposing credentials to client browser bundles.
 
 ---
 
@@ -626,11 +650,11 @@ and faster for a developer tool.
 
 ### Adding a new OTLP signal (metrics, logs)
 
-1. Add a new route in `http_server.cpp` (e.g., `POST /v1/metrics`).
-2. Parse the corresponding protobuf type.
+1. Add a new route in `http_server.cpp` (e.g., `POST /v1/metrics` or `POST /v1/logs`).
+2. Parse the corresponding protobuf type (`ExportMetricsServiceRequest`, `ExportLogsServiceRequest`).
 3. Write to a separate WAL or use a record type prefix.
-4. Extend the materializer to handle the new record type.
-5. Add DuckDB query endpoints.
+4. Extend the materializer to handle the new record type and produce metric/log Parquet tables.
+5. Add DuckDB analytical query endpoints.
 
 ### Adding a Python SDK
 
@@ -651,13 +675,6 @@ with tracer.llm_call(model="gpt-4", prompt="...") as span:
 Replace the DuckDB query layer with ClickHouse client calls. The Parquet
 schema maps directly to a ClickHouse `MergeTree` table. The materializer
 would `INSERT` directly instead of writing Parquet files.
-
-### Adding authentication
-
-1. Add a middleware to FastAPI that validates API keys or JWTs.
-2. Associate API keys with projects in SQLite.
-3. Filter queries by the authenticated project ID.
-4. Add the same validation to the C++ gateway (or use a reverse proxy).
 
 ---
 

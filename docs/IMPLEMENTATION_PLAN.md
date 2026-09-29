@@ -14,73 +14,36 @@ This document outlines the improvements being made to transform the LLM Reliabil
 - **ARCHITECTURE.md**: Complete deep-dive covering every component, data flows, and design decisions.
 - **IMPLEMENTATION_PLAN.md**: This file.
 
-### 2. Code Quality Improvements (In Progress)
+### 2. Code Quality & Reliability Hardening ✅
 
-#### A. C++ Gateway Enhancements
-- ✅ Add comprehensive inline documentation
-- ✅ Add error logging with context
-- ✅ Add request ID tracing
-- ✅ Improve configuration validation
-- ✅ Add graceful degradation for non-critical errors
-- ✅ Add metrics for WAL rotation events
-- ✅ Document thread safety guarantees
-- ✅ Add input sanitization documentation
+#### A. Storage Lifecycle & Parquet Compaction (P0 #1, P0 #2, P1 #10)
+- ✅ Parquet manifest isolation: `get_committed_parquet_files()` only queries files with `status = 'COMMITTED'`
+- ✅ Crash-safe compaction lifecycle: `.tmp` write → atomic rename → atomic SQLite transaction → safe unlink
+- ✅ Orphan file reconciliation: auto-cleanup of uncommitted `.tmp` and stale physical files on startup
+- ✅ Memory-safe streaming compaction: PyArrow row-group streaming via `pq.ParquetWriter`
+- ✅ Cross-process storage locking: SQLite `BEGIN EXCLUSIVE` lock on dedicated lockfile coordinating workers
 
-#### B. Python Backend Enhancements
-- ✅ Add comprehensive docstrings (Google style)
-- ✅ Add logging throughout the application
-- ✅ Add retry logic for transient failures
-- ✅ Add connection pooling hints
-- ✅ Add query optimization documentation
-- ✅ Add comprehensive error handling with context
-- ✅ Add telemetry for materialization performance
+#### B. OpenTelemetry Semantics & Analytics (P0 #3)
+- ✅ Strict status code semantics: `status_code = 2` (STATUS_CODE_ERROR) for error counts and rates
+- ✅ Status UNSET (0) and OK (1) accurately counted as non-errors
+- ✅ Trace detail and waterfall error indicator alignment
 
-#### C. Frontend Enhancements
-- ✅ Add error boundaries
-- ✅ Add loading states
-- ✅ Add empty state improvements
-- ✅ Add accessibility improvements
-- ✅ Add TypeScript strict mode fixes
-- ✅ Add responsive design enhancements
-- ✅ Add user feedback for operations
+#### C. Authentication & Tenant Isolation (P0 #4, P0 #5, P1 #7, P1 #8)
+- ✅ Fail-closed startup validation: `LRCP_REQUIRE_AUTH=true` rejects missing or empty API keys
+- ✅ SHA-256 API key hashing with constant-time `hmac.compare_digest` verification
+- ✅ Project secrets masking: raw keys returned once at creation (HTTP 201) and excluded from listings
+- ✅ Tenant query isolation: project-scoped identity automatically restricts all trace and analytics queries
+- ✅ Frontend server-side auth: Next.js Server Components pass `X-API-Key` without leaking to client bundles
 
-#### D. Testing Enhancements
-- ✅ Add failure scenario tests
-- ✅ Add edge case coverage
-- ✅ Add performance benchmarking framework
-- ✅ Add integration test documentation
-
-#### E. Deployment Improvements
-- ✅ Add complete Helm chart (backend + frontend)
-- ✅ Add health check improvements
-- ✅ Add resource limit recommendations
-- ✅ Add production readiness checklist
-- ✅ Add monitoring and alerting guidelines
-
-### 3. Missing Features to Implement
-
-#### High Priority
-1. **NATS JetStream Integration**: Distributed queueing for multi-node ingestion
-2. **ClickHouse Analytics Engine**: Scaling past local Parquet files
-3. **Retention policies / GC**: Auto-delete old Parquet files and orphaned manifests
-4. **Rate limiting**: Per-client and per-project throttling
-5. **PII redaction**: Content policies for sensitive data
-
-#### Medium Priority
-6. **Metrics export**: Prometheus endpoint
-7. **Error tracking dashboard**: Aggregate failures by service
-8. **Token usage cost analytics**: Cost tracking by model/provider
-9. **OTLP gRPC support**: Alternative to HTTP
-10. **OTLP JSON support**: Alternative to protobuf
-
-#### Low Priority
-11. **Evaluation framework**: LLM response quality metrics
-12. **Prompt registry**: Versioning and management
-13. **RAG retrieval visibility**: Vector search span semantic conventions
+#### D. Defensive Ingestion & Diagnostics (P0 #6, P1 #9, P1 #11, P1 #12)
+- ✅ SQL parameter binding: parameterized `?` placeholders across all DuckDB and SQLite statements
+- ✅ Precise WAL corruption offset: structured `WalCorruptionError` persisting exact byte offsets to SQLite
+- ✅ Active WAL segment ordering: timestamp-sequence sorted physical order invariant
+- ✅ Graceful background worker shutdown: `asyncio.Event` coordination preventing in-flight task corruption
 
 ---
 
-## Code Style Guidelines
+## Performance Targets
 
 ### C++
 - **Modern C++20**: Use `std::optional`, `std::string_view`, structured bindings

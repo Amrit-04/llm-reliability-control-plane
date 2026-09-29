@@ -61,6 +61,8 @@ class Settings:
         batch_size = int(os.environ.get("LRCP_MATERIALIZE_BATCH_SIZE", "5000"))
         max_record_bytes = int(os.environ.get("LRCP_MAX_WAL_RECORD_BYTES", str(64 * 1024 * 1024)))
         api_key = os.environ.get("LRCP_API_KEY")
+        if api_key is not None:
+            api_key = api_key.strip() or None
         require_auth = os.environ.get("LRCP_REQUIRE_AUTH", "false").lower() in ("true", "1", "yes")
         auto_cleanup = os.environ.get("LRCP_AUTO_CLEANUP_WAL", "false").lower() in ("true", "1", "yes")
 
@@ -70,6 +72,8 @@ class Settings:
             raise ValueError("LRCP_MATERIALIZE_BATCH_SIZE must be > 0")
         if max_record_bytes <= 0:
             raise ValueError("LRCP_MAX_WAL_RECORD_BYTES must be > 0")
+        if require_auth and not api_key:
+            raise ValueError("LRCP_REQUIRE_AUTH is true but LRCP_API_KEY is not configured or empty")
 
         return cls(
             data_dir=data_dir,

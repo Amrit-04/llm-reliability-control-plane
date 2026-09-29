@@ -7,12 +7,13 @@ It exposes:
   - Manual and automatic materialization triggers
   - Small-file Parquet compaction & WAL retention cleanup
   - Trace and span query endpoints with proper duration & service aggregation
-  - Project management & tenant isolation
+  - Project management & strict tenant isolation
   - GenAI model analytics with robust token extraction and duration metrics
 """
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -25,7 +26,13 @@ from fastapi.responses import JSONResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from .control import initialize_control_store
+from .control import (
+    initialize_control_store,
+    get_committed_parquet_files,
+    hash_api_key,
+    generate_api_key,
+    verify_project_credential,
+)
 from .materializer import (
     materialize,
     compact_parquet_files,
@@ -45,6 +52,13 @@ logger = logging.getLogger("lrcp.backend")
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
+@dataclass(frozen=True)
+class AuthIdentity:
+    """Authenticated caller identity."""
+    is_admin: bool
+    project_id: str | None = None
+
+
 class ProjectCreate(BaseModel):
     """Request schema for creating a new project."""
     id: str = Field(..., min_length=1, max_length=64, description="Unique project identifier")
@@ -55,6 +69,13 @@ class ProjectCreate(BaseModel):
 class ProjectResponse(BaseModel):
     id: str
     name: str
+    created_at: str | None = None
+
+
+class ProjectCreatedResponse(BaseModel):
+    id: str
+    name: str
+    api_key: str
     created_at: str | None = None
 
 
@@ -76,30 +97,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         f"require_auth={resolved.require_auth}"
     )
 
-    def verify_auth(
+    def get_auth_identity(
         x_api_key: str | None = Security(api_key_header),
         authorization: str | None = Header(None),
-    ) -> None:
-        """Enforce API authentication if require_auth or global api_key is configured."""
-        if not resolved.require_auth and not resolved.api_key:
-            return
-
+    ) -> AuthIdentity:
+        """
+        Authenticate caller and resolve identity (Admin or Project-scoped).
+        """
         token = x_api_key
         if not token and authorization and authorization.startswith("Bearer "):
             token = authorization[7:].strip()
 
-        expected = resolved.api_key
-        if expected and token != expected:
+        # If auth is not required and no token was provided, allow admin access
+        if not resolved.require_auth and not resolved.api_key and not token:
+            return AuthIdentity(is_admin=True, project_id=None)
+
+        if token:
+            token = token.strip()
+
+        # Check global admin key
+        if resolved.api_key and token and token == resolved.api_key:
+            return AuthIdentity(is_admin=True, project_id=None)
+
+        # Check project-specific API keys
+        if token:
+            matched_project = verify_project_credential(resolved, token)
+            if matched_project:
+                return AuthIdentity(is_admin=False, project_id=matched_project)
+
+        # If authentication is required or a token was provided but invalid:
+        if resolved.require_auth or token or resolved.api_key:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing API key",
                 headers={"WWW-Authenticate": "ApiKey"},
             )
 
+        return AuthIdentity(is_admin=True, project_id=None)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         """
-        Application lifespan manager.
+        Application lifespan manager with graceful shutdown.
         """
         logger.info("Starting application lifespan")
         try:
@@ -113,6 +152,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             logger.error(f"Failed to initialize application: {error}")
             raise
 
+        stop_event = asyncio.Event()
         task = None
         if resolved.materialize_interval_seconds > 0:
             logger.info(
@@ -123,7 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             async def _materialize_loop():
                 """Background task: materialize WAL records on a schedule in thread worker."""
                 iteration = 0
-                while True:
+                while not stop_event.is_set():
                     iteration += 1
                     try:
                         count = await asyncio.to_thread(materialize, resolved)
@@ -131,7 +171,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             logger.debug(f"Background iteration {iteration}: materialized {count} spans")
                     except Exception as error:
                         logger.warning(f"Auto-materialization error (iteration {iteration}): {error}")
-                    await asyncio.sleep(resolved.materialize_interval_seconds)
+                    try:
+                        await asyncio.wait_for(stop_event.wait(), timeout=resolved.materialize_interval_seconds)
+                    except asyncio.TimeoutError:
+                        pass
 
             task = asyncio.create_task(_materialize_loop())
         else:
@@ -142,13 +185,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             logger.info("Shutting down application")
+            stop_event.set()
             if task:
-                logger.info("Cancelling background materialization worker")
-                task.cancel()
+                logger.info("Waiting for background materialization worker to finish cleanly")
                 try:
                     await task
                 except asyncio.CancelledError:
-                    logger.info("Background worker cancelled cleanly")
+                    pass
+                logger.info("Background worker completed cleanly")
             logger.info("Application shutdown complete")
 
     application = FastAPI(
@@ -172,16 +216,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         """Health check liveness endpoint."""
         return {"status": "ok"}
 
-    @application.get("/api/v1/system/status", tags=["System"], dependencies=[Depends(verify_auth)])
-    def system_status() -> dict[str, Any]:
+    @application.get("/api/v1/system/status", tags=["System"])
+    def system_status(auth: AuthIdentity = Depends(get_auth_identity)) -> dict[str, Any]:
         """
         Get system health, WAL lifecycle metrics, Parquet statistics, and corruption diagnostics.
         """
         try:
-            wal_files = list(resolved.wal_dir.glob("*.wal"))
+            wal_files = list(resolved.wal_dir.glob("*.wal")) if resolved.wal_dir.exists() else []
             total_wal_bytes = sum(f.stat().st_size for f in wal_files)
-            parquet_files = list(resolved.parquet_dir.glob("*.parquet"))
-            total_parquet_bytes = sum(f.stat().st_size for f in parquet_files)
+            committed_files = get_committed_parquet_files(resolved)
+            total_parquet_bytes = sum(f.stat().st_size for f in committed_files)
 
             with sqlite3.connect(resolved.sqlite_path) as connection:
                 corruptions = [
@@ -210,7 +254,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "fully_materialized_segments": materialized_offsets_count,
                 },
                 "parquet": {
-                    "file_count": len(parquet_files),
+                    "file_count": len(committed_files),
                     "total_bytes": total_parquet_bytes,
                 },
                 "diagnostics": {
@@ -226,8 +270,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Failed to retrieve system status",
             )
 
-    @application.post("/api/v1/materialize", tags=["Materialization"], dependencies=[Depends(verify_auth)])
-    async def run_materializer() -> dict[str, int]:
+    @application.post("/api/v1/materialize", tags=["Materialization"])
+    async def run_materializer(auth: AuthIdentity = Depends(get_auth_identity)) -> dict[str, int]:
         """
         Manually trigger WAL → Parquet materialization off the event loop.
         """
@@ -242,11 +286,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"Materialization failed: {str(error)}"
             )
 
-    @application.post("/api/v1/admin/compact", tags=["Admin"], dependencies=[Depends(verify_auth)])
-    async def run_compaction() -> dict[str, Any]:
+    @application.post("/api/v1/admin/compact", tags=["Admin"])
+    async def run_compaction(auth: AuthIdentity = Depends(get_auth_identity)) -> dict[str, Any]:
         """
-        Compact small Parquet files into consolidated files.
+        Compact small Parquet files into consolidated files. Requires admin privileges.
         """
+        if not auth.is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin authorization required")
         try:
             compacted_rows = await asyncio.to_thread(compact_parquet_files, resolved)
             return {"compacted_rows": compacted_rows}
@@ -257,11 +303,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"Compaction failed: {str(error)}"
             )
 
-    @application.post("/api/v1/admin/wal-cleanup", tags=["Admin"], dependencies=[Depends(verify_auth)])
-    async def run_wal_cleanup() -> dict[str, Any]:
+    @application.post("/api/v1/admin/wal-cleanup", tags=["Admin"])
+    async def run_wal_cleanup(auth: AuthIdentity = Depends(get_auth_identity)) -> dict[str, Any]:
         """
-        Trigger safe cleanup of sealed and materialized WAL segments.
+        Trigger safe cleanup of sealed and materialized WAL segments. Requires admin privileges.
         """
+        if not auth.is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin authorization required")
         try:
             deleted = await asyncio.to_thread(cleanup_materialized_wal_files, resolved)
             return {"deleted_segments": deleted, "count": len(deleted)}
@@ -272,19 +320,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail=f"WAL cleanup failed: {str(error)}"
             )
 
-    @application.get("/api/v1/traces", tags=["Traces"], dependencies=[Depends(verify_auth)])
+    @application.get("/api/v1/traces", tags=["Traces"])
     def list_traces(
         limit: Annotated[int, Query(ge=1, le=1000)] = 100,
         project_id: str | None = None,
         service: str | None = None,
+        auth: AuthIdentity = Depends(get_auth_identity),
     ) -> list[dict]:
         """
         List recent traces with distinct wall-clock duration, aggregate duration, and service hierarchy.
+        Enforces project tenant isolation.
         """
+        if not auth.is_admin:
+            if project_id and project_id != auth.project_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-project access forbidden")
+            project_id = auth.project_id
+
         try:
-            files = list(resolved.parquet_dir.glob("*.parquet"))
+            files = get_committed_parquet_files(resolved)
             if not files:
-                logger.debug("No Parquet files available for trace list query")
+                logger.debug("No committed Parquet files available for trace list query")
                 return []
 
             where_clauses = []
@@ -300,6 +355,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
             params.append(limit)
 
+            # OpenTelemetry status semantics: only status_code = 2 represents ERROR
             query = f"""
               SELECT
                 trace_id,
@@ -311,7 +367,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 max(service_name) AS service_name,
                 list_distinct(list(service_name)) AS services,
                 max(project_id) AS project_id,
-                sum(CASE WHEN status_code != 0 THEN 1 ELSE 0 END) AS error_count
+                sum(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
               FROM read_parquet(?)
               {where_sql}
               GROUP BY trace_id
@@ -324,7 +380,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 results = []
                 for row in cursor.fetchall():
                     d = dict(zip(names, row))
-                    # Filter None from services list
                     if isinstance(d.get("services"), list):
                         d["services"] = [s for s in d["services"] if s]
                     results.append(d)
@@ -338,15 +393,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Failed to query traces"
             )
 
-    @application.get("/api/v1/traces/{trace_id}", tags=["Traces"], dependencies=[Depends(verify_auth)])
-    def get_trace(trace_id: str, project_id: str | None = None) -> list[dict]:
+    @application.get("/api/v1/traces/{trace_id}", tags=["Traces"])
+    def get_trace(
+        trace_id: str,
+        project_id: str | None = None,
+        auth: AuthIdentity = Depends(get_auth_identity),
+    ) -> list[dict]:
         """
         Get all spans for a specific trace with parent-child linkage.
+        Enforces project tenant isolation.
         """
+        if not auth.is_admin:
+            if project_id and project_id != auth.project_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-project access forbidden")
+            project_id = auth.project_id
+
         try:
-            files = list(resolved.parquet_dir.glob("*.parquet"))
+            files = get_committed_parquet_files(resolved)
             if not files:
-                logger.debug(f"No Parquet files available for trace {trace_id}")
+                logger.debug(f"No committed Parquet files available for trace {trace_id}")
                 raise HTTPException(status_code=404, detail="trace not found")
 
             where_clause = "trace_id = ?"
@@ -381,29 +446,46 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Failed to query trace"
             )
 
-    @application.get("/api/v1/projects", tags=["Projects"], response_model=list[ProjectResponse], dependencies=[Depends(verify_auth)])
-    def list_projects() -> list[dict]:
+    @application.get("/api/v1/projects", tags=["Projects"], response_model=list[ProjectResponse])
+    def list_projects(auth: AuthIdentity = Depends(get_auth_identity)) -> list[dict]:
         """List registered projects."""
         try:
             with sqlite3.connect(resolved.sqlite_path) as connection:
-                cursor = connection.execute("SELECT id, name, created_at FROM projects ORDER BY created_at ASC")
+                if auth.is_admin:
+                    cursor = connection.execute("SELECT id, name, created_at FROM projects ORDER BY created_at ASC")
+                else:
+                    cursor = connection.execute(
+                        "SELECT id, name, created_at FROM projects WHERE id = ? ORDER BY created_at ASC",
+                        (auth.project_id,),
+                    )
                 return [{"id": row[0], "name": row[1], "created_at": row[2]} for row in cursor.fetchall()]
         except Exception as error:
             logger.error(f"Failed to list projects: {error}", exc_info=True)
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to list projects")
 
-    @application.post("/api/v1/projects", status_code=201, tags=["Projects"], dependencies=[Depends(verify_auth)])
-    def create_project(project: ProjectCreate) -> dict[str, Any]:
-        """Create a new project container."""
+    @application.post("/api/v1/projects", status_code=201, tags=["Projects"], response_model=ProjectCreatedResponse)
+    def create_project(project: ProjectCreate, auth: AuthIdentity = Depends(get_auth_identity)) -> dict[str, Any]:
+        """Create a new project container and generate/store its hashed API key."""
+        if not auth.is_admin:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin authorization required")
+
         try:
+            raw_key = project.api_key.strip() if project.api_key else generate_api_key()
+            key_hash = hash_api_key(raw_key)
+
             logger.info(f"Creating project: id={project.id}, name={project.name}")
             with sqlite3.connect(resolved.sqlite_path) as connection:
                 connection.execute(
-                    "INSERT INTO projects(id, name, api_key) VALUES (?, ?, ?)",
-                    (project.id, project.name, project.api_key),
+                    "INSERT INTO projects(id, name, api_key_hash) VALUES (?, ?, ?)",
+                    (project.id, project.name, key_hash),
                 )
                 connection.commit()
-            return {k: v for k, v in project.model_dump().items() if v is not None}
+
+            return {
+                "id": project.id,
+                "name": project.name,
+                "api_key": raw_key,
+            }
         except sqlite3.IntegrityError as error:
             logger.warning(f"Project creation failed: {project.id} already exists")
             raise HTTPException(status_code=409, detail="project already exists") from error
@@ -414,13 +496,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Failed to create project"
             )
 
-    @application.get("/api/v1/analytics/overview", tags=["Analytics"], dependencies=[Depends(verify_auth)])
-    def analytics_overview(project_id: str | None = None) -> dict:
+    @application.get("/api/v1/analytics/overview", tags=["Analytics"])
+    def analytics_overview(
+        project_id: str | None = None,
+        auth: AuthIdentity = Depends(get_auth_identity),
+    ) -> dict:
         """
         Get system-wide or per-project observability overview metrics.
+        Enforces project tenant isolation and parameter binding.
         """
+        if not auth.is_admin:
+            if project_id and project_id != auth.project_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-project access forbidden")
+            project_id = auth.project_id
+
         try:
-            files = list(resolved.parquet_dir.glob("*.parquet"))
+            files = get_committed_parquet_files(resolved)
             if not files:
                 return {
                     "total_traces": 0,
@@ -440,6 +531,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 params.append(project_id)
 
             with duckdb.connect() as connection:
+                # OpenTelemetry status semantics: only status_code = 2 represents ERROR
                 summary = connection.execute(
                     f"""
                     SELECT
@@ -458,21 +550,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         json_extract_string(attributes_json, '$.\"gen_ai.usage.output_tokens\"')
                         AS BIGINT
                       )), 0) AS total_output_tokens,
-                      SUM(CASE WHEN status_code != 0 THEN 1 ELSE 0 END) AS error_spans
+                      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_spans
                     FROM read_parquet(?)
                     {where_sql}
                     """,
                     params,
                 ).fetchone()
 
+                # Fully parameterized query for distinct services (no string interpolation)
+                services_where = ["service_name IS NOT NULL", "service_name != ''"]
+                services_params: list[Any] = [[str(file) for file in files]]
+                if project_id:
+                    services_where.append("project_id = ?")
+                    services_params.append(project_id)
+
                 services_query = f"""
                     SELECT DISTINCT service_name FROM read_parquet(?)
-                    WHERE service_name IS NOT NULL AND service_name != ''
-                    {f"AND project_id = '{project_id}'" if project_id else ""}
+                    WHERE {' AND '.join(services_where)}
                 """
                 services = connection.execute(
                     services_query,
-                    [[str(file) for file in files]],
+                    services_params,
                 ).fetchall()
 
                 total_spans = summary[1] or 0
@@ -498,13 +596,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 detail="Failed to compute analytics overview"
             )
 
-    @application.get("/api/v1/analytics/models", tags=["Analytics"], dependencies=[Depends(verify_auth)])
-    def analytics_models(project_id: str | None = None) -> list[dict]:
+    @application.get("/api/v1/analytics/models", tags=["Analytics"])
+    def analytics_models(
+        project_id: str | None = None,
+        auth: AuthIdentity = Depends(get_auth_identity),
+    ) -> list[dict]:
         """
         Get per-model observability metrics with safe token parsing and latency statistics.
+        Enforces project tenant isolation.
         """
+        if not auth.is_admin:
+            if project_id and project_id != auth.project_id:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Cross-project access forbidden")
+            project_id = auth.project_id
+
         try:
-            files = list(resolved.parquet_dir.glob("*.parquet"))
+            files = get_committed_parquet_files(resolved)
             if not files:
                 return []
 
@@ -517,6 +624,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             where_sql = f"WHERE {' AND '.join(where_clauses)}"
 
             with duckdb.connect() as connection:
+                # OpenTelemetry status semantics: only status_code = 2 represents ERROR
                 results = connection.execute(
                     f"""
                     SELECT
@@ -532,7 +640,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                       )), 0) AS total_output_tokens,
                       AVG(duration_ns) AS avg_latency_ns,
                       approx_quantile(duration_ns, 0.95) AS p95_latency_ns,
-                      SUM(CASE WHEN status_code != 0 THEN 1 ELSE 0 END) AS error_count,
+                      SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count,
                       COALESCE(SUM(duration_ns), 0) AS total_duration_ns
                     FROM read_parquet(?)
                     {where_sql}
@@ -551,7 +659,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     error_count = row[6] or 0
                     total_duration_sec = (row[7] or 0) / 1_000_000_000.0
 
-                    # Derive tokens per second if total duration > 0
                     tokens_per_sec = round(output_tokens / total_duration_sec, 2) if total_duration_sec > 0 else 0.0
 
                     rows.append({

@@ -44,7 +44,7 @@ stores, and analyzes OpenTelemetry traces with sub-10ms ingestion latency.
 - Developed analytics API that aggregates per-model metrics (request count, 
   token consumption, p95 latency) using DuckDB SQL pushdown over Parquet files
   
-- Achieved 100% test coverage: 7/7 C++ GTest, 8/8 Python pytest, all passing
+- Achieved 100% test coverage: 9/9 C++ GTest, 45/45 Python pytest, all passing
 ```
 
 ### Systems Engineer / Backend Roles
@@ -148,10 +148,10 @@ workflows. It runs entirely on your laptop with zero external dependencies:
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Next.js Trace Explorer (Port 3000)                             │
-│  • React Server Components (no client JS)                      │
-│  • Dark theme, responsive grid                                  │
+│  • React Server Components (Secure data fetching)               │
+│  • Dark theme, interactive waterfall timeline                   │
 │  • Trace list: service name, span count, duration              │
-│  • Trace detail: span tree with parent relationships           │
+│  • Trace detail: hierarchical span tree inspector              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -362,17 +362,19 @@ async def _materialize_loop():
 
 **Command**: `ctest --test-dir build --output-on-failure -C Debug`
 
-**Results**: 7/7 tests passing (100%)
+**Results**: 9/9 tests passing (100%)
 
 | Test | What It Verifies |
 |------|------------------|
 | `Crc32Compatibility.MatchesPythonBinAsciiVector` | CRC-32 matches Python's `binascii.crc32` — ensures C++/Python WAL compatibility |
-| `HealthEndpointReturnsOk` | `/healthz` returns 200 with `"ok\n"` |
-| `AcceptsBinaryOtlpTraceRequest` | Valid protobuf → 200, WAL record created with correct CRC |
-| `RejectsWrongContentType` | `application/json` → 415 |
-| `RejectsMalformedProtobuf` | Bad bytes → 400 |
-| `RejectsOversizePayload` | Body > limit → 413 |
-| `RotatesWalWhenMaxFileBytesExceeded` | Two records exceeding limit → two separate WAL files |
+| `GatewayTest.HealthEndpointReturnsOk` | `/healthz` returns 200 with `"ok\n"` |
+| `GatewayTest.AcceptsBinaryOtlpTraceRequest` | Valid protobuf → 200, WAL record created with correct CRC |
+| `GatewayTest.RejectsWrongContentType` | `application/json` → 415 |
+| `GatewayTest.RejectsMalformedProtobuf` | Bad bytes → 400 |
+| `GatewayTest.RejectsOversizePayload` | Body > limit → 413 |
+| `GatewayTest.RotatesWalWhenMaxFileBytesExceeded` | Two records exceeding limit → two separate WAL files |
+| `GatewayTest.RejectsUnauthorizedRequestWhenTokenConfigured` | Rejects missing/bad auth tokens with 401 Unauthorized |
+| `GatewayTest.HandlesConcurrentRequestsSafely` | Verifies multi-connection ingestion without data corruption |
 
 **Test File**: `cpp/gateway/tests/gateway_tests.cpp`
 
@@ -380,20 +382,27 @@ async def _materialize_loop():
 
 **Command**: `uv run --project backend pytest backend/tests/ -v`
 
-**Results**: 8/8 tests passing (100%)
+**Results**: 45/45 tests passing (100%)
 
-| Test | What It Verifies |
-|------|------------------|
-| `test_health` | Health endpoint returns `{"status": "ok"}` |
-| `test_crc32_matches_gateway_vector` | Python CRC-32 matches C++ implementation |
-| `test_create_project_rejects_duplicates` | Project creation with unique constraint |
-| `test_materialize_wal_record_once` | Idempotent materialization (no duplicates) |
-| `test_materialize_rejects_checksum_mismatch` | Corrupted WAL record is skipped |
-| `test_query_api_lists_and_fetches_materialized_trace` | End-to-end: WAL → Parquet → Query |
-| `test_analytics_endpoints_with_empty_and_populated_data` | Analytics API returns correct metrics |
-| `test_auto_materialize_in_background` | Background worker materializes within 2s |
-
-**Test File**: `backend/tests/test_api.py`
+| Suite | Tests | What It Verifies |
+|-------|-------|------------------|
+| `test_api.py` | 8 | Basic CRUD, health, idempotent materialization, query aggregation |
+| `test_analytics_and_semantics.py` | 2 | Wall-clock duration vs aggregate duration, safe DuckDB token parsing |
+| `test_auth_and_security.py` | 5 | Bearer/API-key parsing, fail-closed access control, project CRUD |
+| `test_batching_and_lifecycle.py` | 3 | Bounded batching, Parquet compaction, and WAL lifecycle |
+| `test_crash_recovery.py` | 2 | Orphaned temporary file cleanup and crash recovery without duplicate replay |
+| `test_gateway_e2e.py` | 1 | End-to-end integration from C++ gateway subprocess to FastAPI query engine |
+| `test_materializer_concurrency.py` | 2 | Single-writer storage lifecycle lock preventing concurrent race conditions |
+| `test_memory_safe_compaction.py` | 1 | Streaming PyArrow row-group compaction without unbounded RAM buffering |
+| `test_otel_status_semantics.py` | 1 | Strict OpenTelemetry status code semantics (`status_code == 2` for errors) |
+| `test_parquet_compaction_atomicity.py` | 2 | Compaction failure injection and manifest isolation |
+| `test_project_auth_and_isolation.py` | 3 | SHA-256 API key hashing, constant-time verification, multi-tenant isolation |
+| `test_require_auth_fail_closed.py` | 4 | Fail-closed startup validation if auth is required but key is absent/empty |
+| `test_shutdown_lifecycle.py` | 1 | Clean async shutdown and background worker cancellation |
+| `test_sql_injection_regression.py` | 1 | Parameterized SQL queries preventing injection attacks across endpoints |
+| `test_storage_lifecycle_races.py` | 2 | Cross-process exclusive locking across materialization, compaction, and cleanup |
+| `test_wal_corruption_offset.py` | 1 | Exact byte offset and diagnostic logging for WAL corruption events |
+| `test_wal_defensive.py` | 6 | Defensive handling of zero-length, truncated, and corrupt WAL frames |
 
 ### Frontend Build
 
@@ -552,7 +561,7 @@ def analytics_models() -> list[dict]:
                   )) AS total_output_tokens,
                   AVG(duration_ns) AS avg_latency_ns,
                   approx_quantile(duration_ns, 0.95) AS p95_latency_ns,
-                  SUM(CASE WHEN status_code != 0 THEN 1 ELSE 0 END) AS error_count
+                  SUM(CASE WHEN status_code = 2 THEN 1 ELSE 0 END) AS error_count
                 FROM read_parquet(?)
                 WHERE json_extract_string(attributes_json, '$."gen_ai.request.model"') IS NOT NULL
                 GROUP BY model
@@ -623,12 +632,12 @@ No partial writes: `fsync` ensures either full record is persisted or none.
 
 ### Q: What happens if the materializer crashes mid-run?
 
-**A**: The SQLite manifest tracks processed `(file, offset)` pairs. On restart:
-1. Materializer loads manifest
-2. Skips already-processed records
-3. Continues from first unprocessed record
-
-**Known issue**: If crash after Parquet write but before manifest commit, orphan Parquet exists. Solution: compaction pass that reconciles Parquet files with manifest (planned).
+**A**: The materializer employs a crash-safe 2-phase commit using the SQLite manifest:
+1. Batches are written to a temporary Parquet file (`.tmp`).
+2. The file is atomically renamed to `.parquet`.
+3. An atomic SQLite transaction marks the file as `COMMITTED` in the `parquet_files` table and records the WAL offsets in `materialized_wal_records`.
+4. All DuckDB queries strictly use `get_committed_parquet_files()` to read only valid, physically verified, and COMMITTED files.
+5. On the next startup, `cleanup_orphaned_parquet_files()` automatically identifies and deletes any leftover `.tmp` or uncommitted Parquet files, keeping the disk clean without duplicate reads.
 
 ### Q: How does CRC-32 compatibility work across C++ and Python?
 
@@ -712,15 +721,15 @@ LRCP extracts these from `attributes_json` in Parquet for analytics.
 
 **Alternative**: Append to single Parquet file → complex, requires Parquet metadata rewrite.
 
-### Decision 3: Server components only in frontend
+### Decision 3: Server components for data fetching and auth security
 
-**Choice**: Next.js pages are server-rendered, no client-side state.
+**Choice**: Next.js route pages are server-rendered with direct backend communication, paired with an interactive client-side waterfall explorer.
 
-**Benefit**: Simplicity, fast initial load, no hydration errors.
+**Benefit**: Security (API keys kept server-side in Node environment without bundle exposure), simplicity, fast initial load.
 
-**Cost**: No real-time updates (requires page refresh).
+**Cost**: Waterfall timeline interactions occur client-side while query updates require navigation/refresh.
 
-**Alternative**: React Query + WebSocket → real-time, but more complexity.
+**Alternative**: Pure client-side SPA with React Query → exposes backend API keys directly to browser JavaScript.
 
 ### Decision 4: No ORM
 
@@ -736,29 +745,23 @@ LRCP extracts these from `attributes_json` in Parquet for analytics.
 
 ## Roadmap & Future Enhancements
 
-### Near-Term (Next 2-4 weeks)
-
+### Near-Term & Scalability
 - [ ] Bounded queue: Replace mutex serialization with lock-free queue
-- [ ] Authentication: API keys stored in SQLite, validated by middleware
-- [ ] WAL compaction: Merge old segments, clean up materialized data
 - [ ] Retention policies: Auto-delete Parquet files older than N days
 - [ ] Metrics export: Prometheus endpoint for gateway + backend
 
 ### Medium-Term (1-3 months)
-
-- [ ] Trace waterfall UI: Visual timeline of span relationships
+- [ ] Trace hierarchy sampling
 - [ ] Error tracking dashboard: Aggregate failures by service/status
-- [ ] Token usage analytics: Extract `gen_ai.*` attributes, compute costs
-- [ ] Complete Helm chart: Backend + frontend + storage manifests
+- [ ] Token usage analytics cost tracker
+- [ ] Complete Helm chart configurations for backend and frontend
 - [ ] Performance benchmarks: Repeatable load tests with published results
 
 ### Long-Term (3-6 months)
-
 - [ ] NATS JetStream: Production messaging layer
-- [ ] ClickHouse: Production analytical database
+- [ ] ClickHouse: Production analytical database cluster
 - [ ] PII redaction: Content policies with regex/LLM-based detection
-- [ ] Multi-tenancy: Project-level isolation in queries and UI
-- [ ] Evaluation framework: LLM response quality metrics
+- [ ] Evaluation framework: LLM contextual response quality metrics
 
 ---
 

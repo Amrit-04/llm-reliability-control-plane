@@ -52,7 +52,10 @@ def test_create_project_rejects_duplicates(tmp_path: Path):
     with TestClient(create_app(_settings(tmp_path))) as client:
         created = client.post("/api/v1/projects", json={"id": "demo", "name": "Demo"})
         assert created.status_code == 201
-        assert created.json() == {"id": "demo", "name": "Demo"}
+        data = created.json()
+        assert data["id"] == "demo"
+        assert data["name"] == "Demo"
+        assert "api_key" in data
         conflict = client.post("/api/v1/projects", json={"id": "demo", "name": "Other"})
         assert conflict.status_code == 409
 

@@ -65,10 +65,10 @@ LRCP is an observability platform designed specifically for developers building 
                          ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Next.js Trace Explorer (Port 3000)                             │
-│  • React Server Components (no client JS)                      │
-│  • Dark theme, responsive grid                                  │
+│  • React Server Components (Secure data fetching)               │
+│  • Dark theme, interactive waterfall timeline                   │
 │  • Trace list: service name, span count, duration              │
-│  • Trace detail: span tree with parent relationships           │
+│  • Trace detail: hierarchical span tree inspector              │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -365,7 +365,7 @@ cd backend
 uv run pytest -v
 ```
 
-**Results**: 29/29 tests passing (100%)
+**Results**: 45/45 tests passing (100%)
 
 Tests cover:
 - Health and status endpoints
@@ -515,10 +515,10 @@ We welcome contributions! Before opening a PR:
 
 See [`SECURITY.md`](SECURITY.md) for security policy and vulnerability reporting.
 
-**Current limitations**:
-- No authentication (run behind authenticated infrastructure)
-- No TLS (use reverse proxy)
-- No PII redaction (planned)
+**Current limitations & guidelines**:
+- Ingestion `--auth-token` and backend `LRCP_REQUIRE_AUTH` API keys supported (see [`SECURITY.md`](SECURITY.md))
+- No built-in TLS termination (use reverse proxy such as Nginx, Envoy, or Caddy)
+- No automated PII redaction (planned)
 
 ---
 
@@ -562,6 +562,6 @@ Built with:
 
 ---
 
-**Status**: ✅ Production-Grade Local-First Control Plane | 38/38 tests passing | Ready for early adopters  
+**Status**: ✅ Production-Grade Local-First Control Plane | 54/54 tests passing (9 C++ GTest + 45 Python pytest) | Ready for early adopters  
 **Maintained by**: [Amriteshkumar Yadav](https://github.com/Amrit-04)
 

@@ -118,7 +118,7 @@ export function TraceViewer({ traceId, initialSpans, error }: { traceId: string;
       if (span.start_time_unix_nano < min) min = span.start_time_unix_nano;
       if (span.end_time_unix_nano > max) max = span.end_time_unix_nano;
       agg += span.duration_ns;
-      if (span.status_code && span.status_code !== 0 && span.status_code !== 1) errors += 1;
+      if (span.status_code === 2) errors += 1;
       if (span.service_name) services.add(span.service_name);
     }
 
@@ -268,7 +268,7 @@ export function TraceViewer({ traceId, initialSpans, error }: { traceId: string;
               const widthRatio = Math.max(0.005, Math.min(1 - offsetRatio, span.duration_ns / wallClockNs));
               const offsetPercent = (offsetRatio * 100).toFixed(2);
               const widthPercent = (widthRatio * 100).toFixed(2);
-              const isError = span.status_code && span.status_code !== 0 && span.status_code !== 1;
+              const isError = span.status_code === 2;
               const attrs = parseJsonSafe(span.attributes_json);
               const genAi = extractGenAiInfo(attrs);
 
@@ -415,7 +415,7 @@ export function TraceViewer({ traceId, initialSpans, error }: { traceId: string;
                     <div className="kv-row"><span className="kv-key">Relative Start</span><span className="kv-val">+{formatDuration(selectedSpan.start_time_unix_nano - minStart)}</span></div>
                     <div className="kv-row"><span className="kv-key">Start Time (ns)</span><span className="kv-val">{selectedSpan.start_time_unix_nano}</span></div>
                     <div className="kv-row"><span className="kv-key">End Time (ns)</span><span className="kv-val">{selectedSpan.end_time_unix_nano}</span></div>
-                    <div className="kv-row"><span className="kv-key">Status Code</span><span className={`kv-val ${selectedSpan.status_code && selectedSpan.status_code !== 0 && selectedSpan.status_code !== 1 ? "val-error" : ""}`}>{selectedSpan.status_code ?? 0}</span></div>
+                    <div className="kv-row"><span className="kv-key">Status Code</span><span className={`kv-val ${selectedSpan.status_code === 2 ? "val-error" : ""}`}>{selectedSpan.status_code ?? 0}</span></div>
                     {selectedSpan.status_message && (
                       <div className="kv-row"><span className="kv-key">Status Msg</span><span className="kv-val val-error">{selectedSpan.status_message}</span></div>
                     )}
